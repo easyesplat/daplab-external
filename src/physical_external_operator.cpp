@@ -16,6 +16,7 @@ static std::string LogicalTypeToString(const LogicalType &type) {
     if (type == LogicalType::BIGINT) return "BIGINT";
     if (type == LogicalType::VARCHAR) return "VARCHAR";
     if (type == LogicalType::BOOLEAN) return "BOOLEAN";
+    if (type == LogicalType::DOUBLE) return "DOUBLE";
     return type.ToString();
 }
 
@@ -183,6 +184,9 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 				} else if (output_type == LogicalType::BIGINT) {
 					auto data = FlatVector::GetData<int64_t>(vec);
 					data[rows_read] = std::stoll(token_value);
+				} else if (output_type == LogicalType::DOUBLE) {
+					auto data = FlatVector::GetData<double>(vec);
+					data[rows_read] = std::stod(token_value);
 				} else if (output_type == LogicalType::BOOLEAN) {
 					auto data = FlatVector::GetData<bool>(vec);
 					// Support true/false, TRUE/FALSE, 1/0

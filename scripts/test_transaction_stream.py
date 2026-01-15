@@ -27,12 +27,12 @@ csv_path = csv_file.name
 
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow(['transaction_type', 'amount'])  # Header
-csv_writer.writerow(['food', 0])      # Violating: food
-csv_writer.writerow(['food', 50])    # Violating: food
-csv_writer.writerow(['clothing', 100])  # Non-violating: not food
-csv_writer.writerow(['food', 25])    # Violating: food
-csv_writer.writerow(['electronics', 200])  # Non-violating: not food
-csv_writer.writerow(['food', 100])   # Violating: food
+csv_writer.writerow(['food', 0.0])      # Violating: food
+csv_writer.writerow(['food', 50.5])    # Violating: food
+csv_writer.writerow(['clothing', 100.25])  # Non-violating: not food
+csv_writer.writerow(['food', 25.75])    # Violating: food
+csv_writer.writerow(['electronics', 200.99])  # Non-violating: not food
+csv_writer.writerow(['food', 100.0])   # Violating: food
 csv_file.close()
 
 # Create a temporary file for the stream (initially empty)
@@ -48,11 +48,11 @@ con.execute(f"""
 """)
 
 # Define & register the Python UDF
-def address_violating_rows(transaction_type: str, amount: int, stream_endpoint: str) -> bool:
-    """Handle violating rows where transaction_type=="food". Writes row to stream file with amount=0."""
-    # Write the violating row to the stream file with amount=0
+def address_violating_rows(transaction_type: str, amount: float, stream_endpoint: str) -> bool:
+    """Handle violating rows where transaction_type=="food". Writes row to stream file with amount=0.0."""
+    # Write the violating row to the stream file with amount=0.0
     with open(stream_endpoint, 'a') as f:
-        f.write(f"{transaction_type}\t0\n")
+        f.write(f"{transaction_type}\t0.0\n")
         f.flush()
     return False  # Filter out the violating row
 
@@ -78,9 +78,9 @@ passed = len(df) == expected_rows
 # Verify stream data is unionized
 # Count actual rows (not unique rows, since we can have duplicates)
 stream_row_count = sum(1 for _, row in df.iterrows() 
-                       if row['transaction_type'] == 'food' and row['amount'] == 0)
+                       if row['transaction_type'] == 'food' and row['amount'] == 0.0)
 table_row_count = sum(1 for _, row in df.iterrows() 
-                       if not (row['transaction_type'] == 'food' and row['amount'] == 0))
+                       if not (row['transaction_type'] == 'food' and row['amount'] == 0.0))
 
 stream_correct = stream_row_count == 4
 table_correct = table_row_count == 2
