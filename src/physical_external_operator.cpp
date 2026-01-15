@@ -3,10 +3,11 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/string_type.hpp"
-#include <iostream>
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <algorithm>
+#include <cctype>
 
 namespace duckdb {
 
@@ -69,12 +70,10 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 			int max_wait_seconds = 60;
 			int poll_interval_ms = 100;
 			int waited_ms = 0;
-			bool file_found = false;
 			
 			while (waited_ms < max_wait_seconds * 1000) {
 				std::ifstream file_check(gstate.stream_endpoint);
 				if (file_check.good()) {
-					file_found = true;
 					file_check.close();
 					break;
 				}
@@ -130,9 +129,8 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 
 		// If getline failed and we're at EOF, or if we're at EOF and line is empty (no more data)
 		if ((is_fail && is_eof) || (is_eof && line.empty() && !is_good)) {
-			std::cout << "Reached EOF" << std::endl;
-			gstate.stream_file.close();
-			gstate.finished = true;
+			// Don't set finished yet - we might have rows to return first
+			// Just break out of the loop to return what we have
 			break;
 		}
 
@@ -143,50 +141,56 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 			break;
 		}
 
-		// Skip empty lines
-		if (line.empty()) {
+		// Skip empty lines (but only if we're not at EOF)
+		if (line.empty() && !is_eof) {
 			continue;
+		}
+		
+		// If we're at EOF and line is empty, we're done
+		if (line.empty() && is_eof) {
+			break;
 		}
 
 		// Parse tab-separated values
-		// Hard-coded schema: id (INTEGER), status (BOOLEAN), value (INTEGER)
+		// Map tokens to output columns by position (assuming input file columns match output column order)
 		vector<string> tokens;
 		std::istringstream iss(line);
 		std::string token;
 		while (std::getline(iss, token, '\t')) {
-			if (!token.empty()) {
-				tokens.push_back(token);
-			}
+			tokens.push_back(token);
 		}
 
-		int32_t parsed_id = std::stoi(tokens[0]);
-		std::string status_str = tokens[1];
-		bool parsed_status = (status_str == "true" || status_str == "TRUE" || status_str == "1");
-		int32_t parsed_value = std::stoi(tokens[2]);
-		
-		// Map to output columns: find which output column is INTEGER (id), BOOLEAN (status), INTEGER (value)
-		idx_t integer_count = 0;  // Track which INTEGER column we're on (0=id, 1=value)
+		// Skip if we don't have enough tokens for all output columns
+		if (tokens.size() < types.size()) {
+			continue;
+		}
+
+		// Map each token to the corresponding output column by position
 		bool parse_success = true;
 		
-		for (idx_t output_idx = 0; output_idx < types.size(); output_idx++) {
-			auto &vec = chunk.data[output_idx];
-			const LogicalType &output_type = types[output_idx];
-			
+		for (idx_t col_idx = 0; col_idx < types.size() && col_idx < tokens.size(); col_idx++) {
 			try {
-				if (output_type == LogicalType::INTEGER) {
+				auto &vec = chunk.data[col_idx];
+				const LogicalType &output_type = types[col_idx];
+				const std::string &token_value = tokens[col_idx];
+				
+				if (output_type == LogicalType::VARCHAR) {
+					auto data = FlatVector::GetData<string_t>(vec);
+					data[rows_read] = StringVector::AddString(vec, token_value);
+				} else if (output_type == LogicalType::INTEGER) {
 					auto data = FlatVector::GetData<int32_t>(vec);
-					if (integer_count == 0) {
-						// First INTEGER column = id
-						data[rows_read] = parsed_id;
-						integer_count++;
-					} else {
-						// Second INTEGER column = value
-						data[rows_read] = parsed_value;
-					}
+					data[rows_read] = std::stoi(token_value);
+				} else if (output_type == LogicalType::BIGINT) {
+					auto data = FlatVector::GetData<int64_t>(vec);
+					data[rows_read] = std::stoll(token_value);
 				} else if (output_type == LogicalType::BOOLEAN) {
 					auto data = FlatVector::GetData<bool>(vec);
-					data[rows_read] = parsed_status;
+					// Support true/false, TRUE/FALSE, 1/0
+					std::string lower_token = token_value;
+					std::transform(lower_token.begin(), lower_token.end(), lower_token.begin(), ::tolower);
+					data[rows_read] = (lower_token == "true" || lower_token == "1");
 				} else {
+					// Unsupported type - skip this row
 					parse_success = false;
 					break;
 				}
@@ -205,12 +209,19 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 	// Set the cardinality if we read any rows
 	if (rows_read > 0) {
 		chunk.SetCardinality(rows_read);
+		// Check if we're at EOF - if so, mark as finished for next call
+		if (gstate.stream_file.eof()) {
+			gstate.stream_file.close();
+			gstate.finished = true;
+		}
 		return SourceResultType::HAVE_MORE_OUTPUT;
 	}
 
 	// No rows read - check if we're at EOF
 	if (gstate.stream_file.eof() || !gstate.stream_file.is_open()) {
-		gstate.stream_file.close();
+		if (gstate.stream_file.is_open()) {
+			gstate.stream_file.close();
+		}
 		gstate.finished = true;
 		return SourceResultType::FINISHED;
 	}

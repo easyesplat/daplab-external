@@ -3,7 +3,6 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
-#include <iostream>
 
 namespace duckdb {
 
@@ -86,7 +85,7 @@ unique_ptr<LogicalOperator> RewriteAsyncExternalFlow(unique_ptr<LogicalOperator>
 			                                               std::move(op),          // top (original subtree)
 			                                               std::move(external_op), // bottom (external source)
 			                                               LogicalOperatorType::LOGICAL_UNION,
-			                                               false, // setop_all (false = UNION DISTINCT)
+			                                               true,  // setop_all (true = UNION ALL - keep duplicates)
 			                                               true   // allow_out_of_order
 			);
 
