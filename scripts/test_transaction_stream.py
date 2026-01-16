@@ -26,13 +26,13 @@ csv_file = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv')
 csv_path = csv_file.name
 
 csv_writer = csv.writer(csv_file)
-csv_writer.writerow(['transaction_type', 'amount'])  # Header
-csv_writer.writerow(['food', 0.0])      # Violating: food
-csv_writer.writerow(['food', 50.5])    # Violating: food
-csv_writer.writerow(['clothing', 100.25])  # Non-violating: not food
-csv_writer.writerow(['food', 25.75])    # Violating: food
-csv_writer.writerow(['electronics', 200.99])  # Non-violating: not food
-csv_writer.writerow(['food', 100.0])   # Violating: food
+csv_writer.writerow(['transaction_type', 'amount', 'customer_id', 'status', 'is_active'])  # Header
+csv_writer.writerow(['food', 0.0, 101, 'pending', True])      # Violating: food
+csv_writer.writerow(['food', 50.5, 102, 'completed', False])    # Violating: food
+csv_writer.writerow(['clothing', 100.25, 103, 'pending', True])  # Non-violating: not food
+csv_writer.writerow(['food', 25.75, 104, 'completed', True])    # Violating: food
+csv_writer.writerow(['electronics', 200.99, 105, 'pending', False])  # Non-violating: not food
+csv_writer.writerow(['food', 100.0, 106, 'completed', True])   # Violating: food
 csv_file.close()
 
 # Create a temporary file for the stream (initially empty)
@@ -43,16 +43,16 @@ stream_file.close()
 # Load CSV data into DuckDB table
 con.execute(f"""
     CREATE TABLE T AS
-    SELECT transaction_type, amount
+    SELECT transaction_type, amount, customer_id, status, is_active
     FROM read_csv_auto('{csv_path}');
 """)
 
 # Define & register the Python UDF
-def address_violating_rows(transaction_type: str, amount: float, stream_endpoint: str) -> bool:
+def address_violating_rows(transaction_type: str, amount: float, customer_id: int, status: str, is_active: bool, stream_endpoint: str) -> bool:
     """Handle violating rows where transaction_type=="food". Writes row to stream file with amount=0.0."""
-    # Write the violating row to the stream file with amount=0.0
+    # Write the violating row to the stream file with amount=0.0 and all other columns
     with open(stream_endpoint, 'a') as f:
-        f.write(f"{transaction_type}\t0.0\n")
+        f.write(f"{transaction_type}\t0.0\t{customer_id}\t{status}\t{is_active}\n")
         f.flush()
     return False  # Filter out the violating row
 
@@ -64,7 +64,7 @@ SELECT *
 FROM T
 WHERE CASE
         WHEN transaction_type != 'food' THEN TRUE
-        ELSE address_violating_rows(transaction_type, amount, '{stream_path}')
+        ELSE address_violating_rows(transaction_type, amount, customer_id, status, is_active, '{stream_path}')
       END;
 """
 
