@@ -3,11 +3,15 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/types/string_type.hpp"
+#include "duckdb/common/types/decimal.hpp"
+#include "duckdb/common/types/value.hpp"
+#include "duckdb/common/types/hugeint.hpp"
 #include <fstream>
 #include <chrono>
 #include <thread>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
 namespace duckdb {
 
@@ -17,6 +21,11 @@ static std::string LogicalTypeToString(const LogicalType &type) {
     if (type == LogicalType::VARCHAR) return "VARCHAR";
     if (type == LogicalType::BOOLEAN) return "BOOLEAN";
     if (type == LogicalType::DOUBLE) return "DOUBLE";
+    if (type.id() == LogicalTypeId::DECIMAL) {
+        auto width = DecimalType::GetWidth(type);
+        auto scale = DecimalType::GetScale(type);
+        return "DECIMAL(" + std::to_string(width) + "," + std::to_string(scale) + ")";
+    }
     return type.ToString();
 }
 
@@ -110,6 +119,12 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 	chunk.SetCardinality(0);
 
 	// Prepare vectors for each column
+	// Safety check: ensure chunk has enough data vectors
+	if (chunk.data.size() < types.size()) {
+		gstate.finished = true;
+		return SourceResultType::FINISHED;
+	}
+	
 	for (idx_t i = 0; i < types.size(); i++) {
 		chunk.data[i].SetVectorType(VectorType::FLAT_VECTOR);
 	}
@@ -118,7 +133,7 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 	idx_t rows_read = 0;
 	const idx_t chunk_capacity = STANDARD_VECTOR_SIZE; // Use STANDARD_VECTOR_SIZE instead of chunk.size()
 	std::string line;
-
+	
 	while (rows_read < chunk_capacity) {
 		// Read a line from the stream
 		std::getline(gstate.stream_file, line);
@@ -162,15 +177,45 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 		}
 
 		// Skip if we don't have enough tokens for all output columns
+		// The stream file should have all columns in the same order as SELECT output
 		if (tokens.size() < types.size()) {
-			continue;
+			// Try parsing with spaces as fallback
+			if (tokens.size() == 1 && tokens[0] == line) {
+				tokens.clear();
+				std::istringstream iss2(line);
+				std::string token2;
+				while (iss2 >> token2) {  // This splits on whitespace
+					tokens.push_back(token2);
+				}
+				if (tokens.size() < types.size()) {
+					continue;
+				}
+			} else {
+				continue;
+			}
 		}
 
 		// Map each token to the corresponding output column by position
+		// Safety check: ensure we don't access beyond available types or tokens
+		if (tokens.size() != types.size()) {
+			// Skip this row - there's a mismatch between what the UDF wrote and what we expect
+			continue;
+		}
+		
+		// Additional safety check: ensure chunk has enough data vectors
+		if (chunk.data.size() < types.size()) {
+			continue;
+		}
+		
 		bool parse_success = true;
 		
 		for (idx_t col_idx = 0; col_idx < types.size() && col_idx < tokens.size(); col_idx++) {
 			try {
+				// Bounds check before accessing chunk.data
+				if (col_idx >= chunk.data.size()) {
+					parse_success = false;
+					break;
+				}
 				auto &vec = chunk.data[col_idx];
 				const LogicalType &output_type = types[col_idx];
 				const std::string &token_value = tokens[col_idx];
@@ -184,6 +229,9 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 				} else if (output_type == LogicalType::BIGINT) {
 					auto data = FlatVector::GetData<int64_t>(vec);
 					data[rows_read] = std::stoll(token_value);
+				} else if (output_type == LogicalType::UBIGINT) {
+					auto data = FlatVector::GetData<uint64_t>(vec);
+					data[rows_read] = std::stoull(token_value);
 				} else if (output_type == LogicalType::DOUBLE) {
 					auto data = FlatVector::GetData<double>(vec);
 					data[rows_read] = std::stod(token_value);
@@ -193,6 +241,51 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 					std::string lower_token = token_value;
 					std::transform(lower_token.begin(), lower_token.end(), lower_token.begin(), ::tolower);
 					data[rows_read] = (lower_token == "true" || lower_token == "1");
+				} else if (output_type.id() == LogicalTypeId::DECIMAL) {
+					// Parse DECIMAL type
+					auto width = DecimalType::GetWidth(output_type);
+					auto scale = DecimalType::GetScale(output_type);
+					
+					// Use DuckDB's Value class to parse the string
+					Value decimal_value;
+					try {
+						// Try to parse as double first, then convert to decimal
+						double double_val = std::stod(token_value);
+						// Create decimal value based on internal type
+						switch (output_type.InternalType()) {
+							case PhysicalType::INT16: {
+								auto data = FlatVector::GetData<int16_t>(vec);
+								// Convert double to int16 with scale
+								int64_t scaled = static_cast<int64_t>(double_val * std::pow(10, scale));
+								data[rows_read] = static_cast<int16_t>(scaled);
+								break;
+							}
+							case PhysicalType::INT32: {
+								auto data = FlatVector::GetData<int32_t>(vec);
+								int64_t scaled = static_cast<int64_t>(double_val * std::pow(10, scale));
+								data[rows_read] = static_cast<int32_t>(scaled);
+								break;
+							}
+							case PhysicalType::INT64: {
+								auto data = FlatVector::GetData<int64_t>(vec);
+								int64_t scaled = static_cast<int64_t>(double_val * std::pow(10, scale));
+								data[rows_read] = scaled;
+								break;
+							}
+							case PhysicalType::INT128: {
+								auto data = FlatVector::GetData<hugeint_t>(vec);
+								// For INT128, we need to handle hugeint
+								int64_t scaled = static_cast<int64_t>(double_val * std::pow(10, scale));
+								data[rows_read] = hugeint_t(scaled);
+								break;
+							}
+							default:
+								throw std::runtime_error("Unsupported DECIMAL internal type");
+						}
+					} catch (const std::exception &e) {
+						parse_success = false;
+						break;
+					}
 				} else {
 					// Unsupported type - skip this row
 					parse_success = false;
@@ -222,7 +315,65 @@ SourceResultType PhysicalExternalOperator::GetData(ExecutionContext &context, Da
 	}
 
 	// No rows read - check if we're at EOF
+	// If file is empty and we haven't waited yet, wait a bit for UDF to write data before finishing
+	
 	if (gstate.stream_file.eof() || !gstate.stream_file.is_open()) {
+		// Check if file is empty by checking file size
+		// If empty and we haven't waited yet, wait a bit for UDF to write data
+		if (gstate.stream_file.is_open() && !gstate.has_waited_for_data) {
+			// Get current file position
+			auto current_pos = gstate.stream_file.tellg();
+			// Seek to end to check file size
+			gstate.stream_file.seekg(0, std::ios::end);
+			auto file_size = gstate.stream_file.tellg();
+			// Seek back to beginning
+			gstate.stream_file.seekg(0, std::ios::beg);
+			// Clear EOF flag
+			gstate.stream_file.clear();
+			
+			// If file is empty, wait a bit for data to be written
+			if (file_size == 0 || file_size == current_pos) {
+				gstate.has_waited_for_data = true;
+				// Wait a bit for UDF to write data (max 500ms)
+				int max_wait_ms = 500;
+				int poll_interval_ms = 100;
+				int waited_ms = 0;
+				
+				while (waited_ms < max_wait_ms) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+					waited_ms += poll_interval_ms;
+					
+					// Check file size again
+					gstate.stream_file.seekg(0, std::ios::end);
+					auto new_file_size = gstate.stream_file.tellg();
+					gstate.stream_file.seekg(0, std::ios::beg);
+					gstate.stream_file.clear();
+					
+					// If file now has data, break and try reading again
+					if (new_file_size > 0 && new_file_size > current_pos) {
+						break;
+					}
+				}
+				
+				// If we waited and file is still empty, finish
+				gstate.stream_file.seekg(0, std::ios::end);
+				auto final_file_size = gstate.stream_file.tellg();
+				if (final_file_size == 0 || final_file_size == current_pos) {
+					if (gstate.stream_file.is_open()) {
+						gstate.stream_file.close();
+					}
+					gstate.finished = true;
+					return SourceResultType::FINISHED;
+				}
+				
+				// File now has data, seek back to beginning and continue
+				gstate.stream_file.seekg(0, std::ios::beg);
+				gstate.stream_file.clear();
+				// Don't finish - return to let caller try reading again
+				return SourceResultType::HAVE_MORE_OUTPUT;
+			}
+		}
+		
 		if (gstate.stream_file.is_open()) {
 			gstate.stream_file.close();
 		}

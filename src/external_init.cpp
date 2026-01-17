@@ -7,7 +7,7 @@ void AddExternal(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &pl
     if (!plan) {
         return; // No plan to modify
     }
-    plan = RewriteAsyncExternalFlow(std::move(plan));
+    plan = RewriteAsyncExternalFlow(input, std::move(plan));
 }
 
 } // namespace duckdb

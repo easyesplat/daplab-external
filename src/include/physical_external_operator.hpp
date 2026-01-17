@@ -17,6 +17,7 @@ public:
     std::ifstream stream_file;
     std::string line_buffer; // Buffer for incomplete lines
     idx_t rows_emitted = 0;
+    bool has_waited_for_data = false; // Track if we've already waited for data
     
     ~ExternalGlobalSourceState() {
         if (stream_file.is_open()) {

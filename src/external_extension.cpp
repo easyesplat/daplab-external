@@ -63,23 +63,23 @@ static void LoadInternal(ExtensionLoader &loader) {
     OptimizerExtension optimizer_extension;
     optimizer_extension.optimize_function =
         [](OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-            std::cout << "============ LOGICAL PLAN ============\n";
-            if (plan) {
-                std::cout << plan->ToString() << std::endl;
-            } else {
-                std::cout << "<null logical plan>" << std::endl;
-            }
-            std::cout << "======================================\n";
+            // std::cout << "============ LOGICAL PLAN ============\n";
+            // if (plan) {
+            //     std::cout << plan->ToString() << std::endl;
+            // } else {
+            //     std::cout << "<null logical plan>" << std::endl;
+            // }
+            // std::cout << "======================================\n";
             
             // Call AddExternal to inject the extension
             AddExternal(input, plan);
-			std::cout << "============ Edited PLAN ============\n";
-            if (plan) {
-                std::cout << plan->ToString() << std::endl;
-            } else {
-                std::cout << "<null logical plan>" << std::endl;
-            }
-            std::cout << "======================================\n";
+			// std::cout << "============ Edited PLAN ============\n";
+            // if (plan) {
+            //     std::cout << plan->ToString() << std::endl;
+            // } else {
+            //     std::cout << "<null logical plan>" << std::endl;
+            // }
+            // std::cout << "======================================\n";
         };
 
     db.config.optimizer_extensions.push_back(std::move(optimizer_extension));
