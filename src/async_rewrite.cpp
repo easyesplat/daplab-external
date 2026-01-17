@@ -6,6 +6,7 @@
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/common/types/value.hpp"
 
 namespace duckdb {
 
@@ -213,50 +214,61 @@ unique_ptr<LogicalOperator> RewriteAsyncExternalFlow(OptimizerExtensionInput &in
 				
 				// Project external operator to match SELECT projection
 				// The UDF receives columns in order: source table columns + SELECT output columns
-				// We want to keep only the SELECT output columns (last N columns)
+				// We want to keep only the SELECT output columns (skip source columns)
+				// Note: SELECT projection may include aggregate temp columns that aren't in the UDF
 				unique_ptr<LogicalOperator> external_op_for_union = std::move(external_op);
-				if (external_op_for_union->types.size() != union_column_count) {
-					if (external_op_for_union->types.size() < union_column_count) {
-						throw InternalException("External operator has fewer columns (%llu) than UNION requires (%llu)", 
-						                        external_op_for_union->types.size(), union_column_count);
-					}
-					// Take the last N columns (SELECT output), skipping source columns at the beginning
-					idx_t skip_count = external_op_for_union->types.size() - union_column_count;
-					
-					vector<unique_ptr<Expression>> projection_expressions;
-					projection_expressions.reserve(union_column_count);
-					for (idx_t i = 0; i < union_column_count; i++) {
-						idx_t source_idx = skip_count + i;
-						unique_ptr<Expression> ref_expr = make_uniq<BoundReferenceExpression>(external_op_for_union->types[source_idx], source_idx);
-						
-						// Cast to match SELECT projection type if needed
-						if (ref_expr->return_type != union_types[i]) {
-							ref_expr = BoundCastExpression::AddCastToType(input.context, std::move(ref_expr), union_types[i]);
-						}
-						
-						projection_expressions.push_back(std::move(ref_expr));
-					}
-					
-					// Get table_index from SELECT projection
-					auto select_bindings = select_projection->GetColumnBindings();
-					idx_t union_table_index = 0;
-					if (!select_bindings.empty()) {
-						union_table_index = select_bindings[0].table_index;
-					}
-					
-					idx_t projection_table_index = union_table_index + 1;
-					auto projection = make_uniq<LogicalProjection>(projection_table_index, std::move(projection_expressions));
-					projection->children.push_back(std::move(external_op_for_union));
-					projection->ResolveOperatorTypes();
-					external_op_for_union = std::move(projection);
+				
+				// Always create a projection to properly map columns
+				// External operator has: [source_cols..., SELECT_output_cols...]
+				// SELECT projection has: [SELECT_output_cols..., aggregate_temp_cols...]
+				// We need to map: skip source_cols, take SELECT_output_cols, add NULLs for aggregate_temp_cols
+				
+				idx_t external_select_cols = udf_info.original_column_count;  // SELECT columns in external op (excluding temp)
+				idx_t aggregate_temp_cols = union_column_count - external_select_cols;  // Temp columns only in SELECT
+				
+				if (external_op_for_union->types.size() < udf_info.source_column_count + external_select_cols) {
+					throw InternalException("External operator has fewer columns than expected");
 				}
 				
-				// Create UNION combining SELECT projection and external operator
+				vector<unique_ptr<Expression>> projection_expressions;
+				projection_expressions.reserve(union_column_count);
+				
+				// Map SELECT output columns from external operator (skip source columns)
+				for (idx_t i = 0; i < external_select_cols; i++) {
+					idx_t source_idx = udf_info.source_column_count + i;  // Skip source columns
+					
+					unique_ptr<Expression> ref_expr = make_uniq<BoundReferenceExpression>(external_op_for_union->types[source_idx], source_idx);
+					
+					// Cast to match SELECT projection type if needed
+					if (ref_expr->return_type != union_types[i]) {
+						ref_expr = BoundCastExpression::AddCastToType(input.context, std::move(ref_expr), union_types[i]);
+					}
+					
+					projection_expressions.push_back(std::move(ref_expr));
+				}
+				
+				// Add NULL expressions for aggregate temp columns (these aren't in the external operator)
+				for (idx_t i = external_select_cols; i < union_column_count; i++) {
+					unique_ptr<Expression> null_expr = make_uniq<BoundConstantExpression>(Value(union_types[i]));
+					projection_expressions.push_back(std::move(null_expr));
+				}
+				
+				// Get table_index from SELECT projection
 				auto select_bindings = select_projection->GetColumnBindings();
 				idx_t union_table_index = 0;
 				if (!select_bindings.empty()) {
 					union_table_index = select_bindings[0].table_index;
 				}
+				
+				idx_t projection_table_index = union_table_index + 1;
+				auto projection = make_uniq<LogicalProjection>(projection_table_index, std::move(projection_expressions));
+				projection->children.push_back(std::move(external_op_for_union));
+				projection->ResolveOperatorTypes();
+				external_op_for_union = std::move(projection);
+				
+				// Create UNION combining SELECT projection and external operator
+				// Reuse select_bindings and union_table_index from above
+				external_op_for_union->ResolveOperatorTypes();
 				
 				auto union_op = make_uniq<LogicalSetOperation>(union_table_index,             
 				                                               union_column_count,
